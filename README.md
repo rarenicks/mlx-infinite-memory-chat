@@ -1,4 +1,4 @@
-# Infinite Context Local MLX
+# MLX infinite memory chat
 
 A high-performance local chatbot for Apple Silicon. It uses a hybrid approach (RAG + Summarization) to let you chat with unlimited-size documents completely offline.
 
@@ -29,8 +29,8 @@ A high-performance local chatbot for Apple Silicon. It uses a hybrid approach (R
 
 2.  **Clone & Install**:
     ```bash
-    git clone https://github.com/yourusername/infinite-context-local-mlx-memory.git
-    cd infinite-context-local-mlx-memory
+    git clone https://github.com/rarenicks/mlx-infinite-memory-chat.git
+    cd mlx-infinite-memory-chat
     make install
     ```
 
