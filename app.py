@@ -1,5 +1,6 @@
 import chainlit as cl
-from mlx_lm import generate
+from mlx_lm import generate, stream_generate
+import mlx.core as mx
 from mlx_lm.sample_utils import make_sampler
 from src.model_loader import load_model, check_memory
 from src.context_manager import ContextManager
@@ -106,16 +107,175 @@ async def main(message: cl.Message):
     # 2. Add User Message to History
     context_manager.add_message("user", message.content)
     
-    # 3. Prepare Messages
-    print("INFO: Preparing context and calculating tokens...")
-    messages = context_manager.get_messages_for_inference()
+    # --- UPGRADE 2: "System 2" Reasoning Planner ---
+    # We want to "Think" before we "Speak".
     
-    # Estimate prefill time
-    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    prompt_tokens = len(tokenizer.encode(prompt))
-    estimated_time = prompt_tokens / 1000
+    # 1. Define the Reasoning Prompt
+    reasoning_system_prompt = "You are a logic engine. Analyze the user's request. Break down the steps needed to answer this accurately based on the provided Reference Material. Output a concise plan."
     
-    print(f"INFO: Context ready. Total tokens: {prompt_tokens:,}. Est. wait: {estimated_time:.1f}s")
+    # Create a temporary context for reasoning (System + User)
+    # We don't want the full RAG context here necessarily, or maybe we do? 
+    # Let's use the full context so it knows what it has access to.
+    # But we need to inject the specific instruction.
+    
+    # Actually, let's just append the instruction to the messages for the reasoning step
+    reasoning_messages = context_manager.get_messages_for_inference()
+    # Replace the last user message with the reasoning prompt + user message
+    last_user_msg = reasoning_messages[-1]['content']
+    reasoning_messages[-1]['content'] = f"{last_user_msg}\n\n[INSTRUCTION: {reasoning_system_prompt}]"
+    
+    reasoning_step = cl.Step(name="🧠 Reasoning", type="tool")
+    await reasoning_step.send()
+    
+    reasoning_plan = ""
+    
+    # Generate Reasoning
+    # We use a separate lock acquisition here if needed, but since it's sequential in this async function, 
+    # we just need to make sure we don't conflict with background summarizer.
+    
+    print("INFO: Starting Reasoning Step...")
+    
+    # We'll use a simple generate call for reasoning (no streaming needed for the step content necessarily, but looks cool)
+    # Let's stream it to the step.
+    
+    try:
+        # Prepare prompt for reasoning
+        reasoning_prompt = tokenizer.apply_chat_template(reasoning_messages, tokenize=False, add_generation_prompt=True)
+        
+        # Stream reasoning
+        with model_lock:
+            for response in stream_generate(model, tokenizer, prompt=reasoning_prompt, max_tokens=512, sampler=make_sampler(0.7)):
+                reasoning_plan += response.text
+                await reasoning_step.stream_token(response.text)
+                
+        await reasoning_step.update()
+        
+    except Exception as e:
+        print(f"ERROR in Reasoning: {e}")
+        reasoning_plan = "Error generating plan. Proceeding with direct answer."
+        await reasoning_step.stream_token(f"\nError: {e}")
+        await reasoning_step.update()
+
+    # Append the plan to the context for the final answer
+    # We treat the plan as an "assistant" thought, or just part of the context.
+    # Let's add it as an assistant message, then the user says "Proceed".
+    # Or simpler: Just inject it into the final prompt.
+    
+    # Let's add it to the history temporarily or just modify the prompt?
+    # Modifying the prompt is safer to not pollute the visible chat history with "thoughts".
+    
+    # --- UPGRADE 1: MLX KV Context Caching ---
+    
+    # 1. Get Static Context (System Prompt + RAG/Docs)
+    # We need to separate the "Static" part (System + Docs) from the "Dynamic" part (Chat History).
+    # For simplicity in this v1, we will cache the *entire* conversation up to the last turn.
+    # But the user asked for "Static Context". 
+    
+    # Let's implement a robust KV Cache strategy:
+    # Cache = KV Cache of (System Prompt + All RAG Context).
+    # This is "Static" as long as no new files are added.
+    
+    # Check if we have a valid cache
+    kv_cache = cl.user_session.get("kv_cache")
+    cached_text = cl.user_session.get("cached_text")
+    
+    # Construct the text we WANT to cache (System + RAG)
+    # We need a way to get JUST the system + RAG messages.
+    # ContextManager doesn't explicitly separate them easily, but we know they are at the start.
+    # Let's assume: System Prompt + Document Summary + RAG Chunks are the "Static" prefix.
+    
+    # Hack: Let's rebuild the prompt.
+    # The prompt is: <|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}\n\n{mental_model}\n\n{rag_context}<|eot_id|>...
+    
+    # We will cache the tokenized output of this prefix.
+    
+    current_system_msg = context_manager.system_prompt
+    if context_manager.document_summary:
+        current_system_msg += f"\n\n=== MENTAL MODEL ===\n{context_manager.document_summary}"
+    
+    # RAG context is dynamic per query? 
+    # WAIT. RAG retrieves *different* chunks for every query.
+    # If RAG changes every turn, we CANNOT cache it as "Static".
+    # The user asked to cache "System Prompt + Uploaded Document Context".
+    # If we are using RAG, the "Uploaded Document Context" is the *retrieved* chunks.
+    # If we use the *entire* document, that's different.
+    
+    # Interpretation: The user might assume we are stuffing the whole doc, OR they want to cache the System Prompt + Mental Model.
+    # Since RAG is dynamic, we can only cache the System Prompt + Mental Model.
+    # UNLESS: We cache the *prefix* of the prompt which is just the System Prompt + Mental Model.
+    
+    # Let's cache the System Prompt + Mental Model.
+    static_text = current_system_msg
+    
+    # If cache is missing or text changed, rebuild it.
+    if kv_cache is None or cached_text != static_text:
+        print("INFO: KV Cache Miss. Rebuilding static cache...")
+        # Tokenize just the system message part
+        # We need to manually format it as a system message for Llama 3
+        static_tokens = tokenizer.encode(f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{static_text}<|eot_id|>")
+        
+        # Prefill
+        from mlx_lm.models.cache import make_prompt_cache
+        
+        kv_cache = make_prompt_cache(model)
+        
+        # We need to process these tokens to populate the cache
+        # We can use `model(input_ids, cache=kv_cache)`
+        input_ids = mx.array(static_tokens)[None, :]
+        
+        with model_lock:
+            model(input_ids, cache=kv_cache)
+            
+        # Store in session
+        cl.user_session.set("kv_cache", kv_cache)
+        cl.user_session.set("cached_text", static_text)
+        print(f"INFO: KV Cache Rebuilt. ({len(static_tokens)} tokens)")
+    else:
+        print("INFO: KV Cache Hit! Reusing static context.")
+
+    # 2. Generate Final Response using Cache
+    # Now we need to generate the REST of the prompt (History + User Message + Plan)
+    # And append it to the cached context.
+    
+    # We need to be careful. `stream_generate` usually takes a prompt.
+    # If we pass `kv_cache`, it assumes the prompt *continues* from where the cache left off.
+    # So we must NOT include the System Message in the prompt we pass to `stream_generate`.
+    
+    # Construct dynamic prompt (History + User)
+    # We need to strip the system message from the messages list because it's already in the cache.
+    # Use get_messages_for_inference() instead of non-existent .messages attribute
+    full_messages = context_manager.get_messages_for_inference()
+    
+    # Filter out the static parts (System Prompt + Mental Model) that are already in KV Cache
+    # We know RAG chunks (also role=system) are dynamic, so we KEEP them.
+    # The static parts are the first 1 or 2 messages.
+    
+    dynamic_messages = []
+    for m in full_messages:
+        # If it's the main system prompt or mental model, skip it (it's cached)
+        # We identify them by content match or just assumption.
+        # Safer: Check if content is part of static_text
+        if m['role'] == 'system' and (m['content'] == context_manager.system_prompt or "=== CURRENT DOCUMENT MENTAL MODEL ===" in m['content']):
+            continue
+        dynamic_messages.append(m)
+    
+    # Add the plan to the context
+    dynamic_messages.append({"role": "assistant", "content": f"Plan:\n{reasoning_plan}\n\nProceeding with answer."})
+    dynamic_messages.append({"role": "user", "content": "Please provide the final answer based on the plan."})
+    
+    # Apply template but EXCLUDE the system prompt (since we manually cached it)
+    # Llama 3 template usually starts with system. We need to trick it.
+    # We will just format the conversation history manually or use the tokenizer without system.
+    
+    # Better approach for Llama 3:
+    # The cache contains: <|begin_of_text|><|start_header_id|>system...<|eot_id|>
+    # The next tokens should start with <|start_header_id|>user... (or whatever the next message is)
+    
+    dynamic_prompt = ""
+    for m in dynamic_messages:
+        dynamic_prompt += f"<|start_header_id|>{m['role']}<|end_header_id|>\n\n{m['content']}<|eot_id|>"
+    
+    dynamic_prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
     
     # 4. Generate Response
     settings = cl.user_session.get("settings")
@@ -136,18 +296,11 @@ async def main(message: cl.Message):
 
     response_content = ""
     
-    # Streaming generation
-    from mlx_lm import stream_generate
-    import mlx.core as mx
-    
     # Verify device
     print(f"INFO: MLX Device: {mx.default_device()}")
     
     start_time = time.time()
     
-    if prompt_tokens > 10000:
-        print(f"INFO: Large prompt detected ({prompt_tokens:,} tokens). This may take ~{estimated_time:.0f}s.")
-
     # Queue for passing tokens from thread to async loop
     token_queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
@@ -166,12 +319,15 @@ async def main(message: cl.Message):
             
             # Acquire lock to prevent Metal concurrency crashes
             with model_lock:
+                # IMPORTANT: We must pass the KV Cache here
+                # And the prompt is ONLY the dynamic part
                 for response in stream_generate(
                     model, 
                     tokenizer, 
-                    prompt=prompt, 
+                    prompt=dynamic_prompt, 
                     max_tokens=max_tokens, 
-                    sampler=sampler
+                    sampler=sampler,
+                    prompt_cache=kv_cache # Use the cache!
                 ):
                     current_time = time.time()
                     
@@ -187,11 +343,7 @@ async def main(message: cl.Message):
                     token_count += 1
             
             decode_duration = time.time() - decode_start
-            # We generated (token_count - 1) tokens during decode_duration (since 1st token is prefill end)
-            # But usually stream_generate yields the first token *after* prefill.
-            # So all tokens are part of the "streaming" phase, but the *wait* for the first one is prefill.
             
-            # Let's calculate TPS based on the time from 1st token to last token
             if token_count > 1 and decode_duration > 0:
                 tps = (token_count - 1) / decode_duration
                 print(f"INFO: Generation complete. Decode Speed: {tps:.2f} tokens/sec (excluding prefill).")
