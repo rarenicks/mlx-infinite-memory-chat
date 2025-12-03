@@ -5,7 +5,7 @@ install:
 	$(VENV_PYTHON) -m pip install -r requirements.txt
 
 download-model:
-	huggingface-cli download mlx-community/Meta-Llama-3.1-70B-Instruct-4bit --local-dir models/Llama-3.1-70B-Instruct-4bit
+	huggingface-cli download mlx-community/Meta-Llama-3.1-8B-Instruct-4bit --local-dir models/Llama-3.1-8B-Instruct-4bit
 
 run:
 	$(VENV_CHAINLIT) run app.py -w
