@@ -16,11 +16,12 @@ model = None
 tokenizer = None
 context_manager = None
 summarizer = None
+model_lock = threading.Lock()
 
 @cl.on_chat_start
 async def start():
-    global model, tokenizer, context_manager
-
+    global model, tokenizer, context_manager, summarizer, model_lock
+    
     # 1. Memory Check
     is_safe, msg = check_memory()
     if not is_safe:
@@ -33,7 +34,7 @@ async def start():
         try:
             model, tokenizer = load_model()
             context_manager = ContextManager(tokenizer)
-            summarizer = RecursiveSummarizer(model, tokenizer) # Initialize summarizer here
+            summarizer = RecursiveSummarizer(model, tokenizer, model_lock) # Pass lock
             msg.content = "✅ Model loaded successfully! You can now start chatting."
             await msg.update()
         except Exception as e:
@@ -163,25 +164,27 @@ async def main(message: cl.Message):
             # We need to track time *inside* the loop to separate prefill from decode
             start_gen = time.time()
             
-            for response in stream_generate(
-                model, 
-                tokenizer, 
-                prompt=prompt, 
-                max_tokens=max_tokens, 
-                sampler=sampler
-            ):
-                current_time = time.time()
-                
-                if token_count == 0:
-                    # First token received (Prefill done)
-                    first_token_time = current_time
-                    decode_start = current_time
-                    prefill_duration = first_token_time - start_gen
-                    print(f"INFO: Prefill complete in {prefill_duration:.2f}s")
-                
-                # Put token in queue in a thread-safe way
-                loop.call_soon_threadsafe(token_queue.put_nowait, response.text)
-                token_count += 1
+            # Acquire lock to prevent Metal concurrency crashes
+            with model_lock:
+                for response in stream_generate(
+                    model, 
+                    tokenizer, 
+                    prompt=prompt, 
+                    max_tokens=max_tokens, 
+                    sampler=sampler
+                ):
+                    current_time = time.time()
+                    
+                    if token_count == 0:
+                        # First token received (Prefill done)
+                        first_token_time = current_time
+                        decode_start = current_time
+                        prefill_duration = first_token_time - start_gen
+                        print(f"INFO: Prefill complete in {prefill_duration:.2f}s")
+                    
+                    # Put token in queue in a thread-safe way
+                    loop.call_soon_threadsafe(token_queue.put_nowait, response.text)
+                    token_count += 1
             
             decode_duration = time.time() - decode_start
             # We generated (token_count - 1) tokens during decode_duration (since 1st token is prefill end)

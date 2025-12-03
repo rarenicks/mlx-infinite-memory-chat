@@ -3,10 +3,13 @@ from mlx_lm import generate
 from typing import List
 import time
 
+import threading
+
 class RecursiveSummarizer:
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, model_lock: threading.Lock = None):
         self.model = model
         self.tokenizer = tokenizer
+        self.model_lock = model_lock or threading.Lock()
 
     def summarize(self, chunks: List[str], filename: str) -> str:
         """
@@ -38,7 +41,10 @@ Summary:
 """
             # Generate summary for this group
             # We use a lower max_tokens to keep it concise
-            summary = generate(self.model, self.tokenizer, prompt=prompt, max_tokens=200, verbose=False)
+            # Acquire lock to prevent Metal concurrency crashes
+            with self.model_lock:
+                summary = generate(self.model, self.tokenizer, prompt=prompt, max_tokens=200, verbose=False)
+            
             intermediate_summaries.append(summary)
             print(f"DEBUG: Summarized group {i//group_size + 1}/{(len(chunks)+group_size-1)//group_size}")
 
@@ -63,7 +69,8 @@ Summaries:
 Final Mental Model:
 """
         print("INFO: Summarizer - Generating final Mental Model...")
-        final_summary = generate(self.model, self.tokenizer, prompt=final_prompt, max_tokens=1000, verbose=False)
+        with self.model_lock:
+            final_summary = generate(self.model, self.tokenizer, prompt=final_prompt, max_tokens=1000, verbose=False)
         
         duration = time.time() - start_time
         print(f"INFO: Summarizer - Completed in {duration:.2f}s")

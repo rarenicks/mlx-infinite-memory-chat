@@ -4,8 +4,8 @@ from mlx_lm import load, generate
 import os
 
 # Constants
-MIN_MEMORY_GB = 32  # Minimum RAM required to attempt loading 70B 4-bit safely
-MODEL_PATH_DEFAULT = "mlx-community/Meta-Llama-3.1-70B-Instruct-4bit"
+MIN_MEMORY_GB = 8  # Minimum RAM required to attempt loading 8B 4-bit safely
+MODEL_PATH_DEFAULT = "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
 
 def check_memory():
     """
@@ -22,7 +22,7 @@ def check_memory():
         return False, f"Total system memory ({total_gb:.1f}GB) is below the recommended {MIN_MEMORY_GB}GB for this model."
     
     # Warning if available memory is low, but don't hard block if swap is available (macOS handles this well)
-    if available_gb < 8:
+    if available_gb < 4:
         print(f"WARNING: Available memory is low ({available_gb:.1f}GB). Performance may degrade.")
         
     return True, "Memory check passed."
@@ -34,8 +34,8 @@ def load_model(model_path=MODEL_PATH_DEFAULT):
     print(f"Loading model from {model_path}...")
     
     # Check if local path exists, otherwise treat as HF repo ID
-    if os.path.exists("models/Llama-3.1-70B-Instruct-4bit"):
-        model_path = "models/Llama-3.1-70B-Instruct-4bit"
+    if os.path.exists("models/Llama-3.1-8B-Instruct-4bit"):
+        model_path = "models/Llama-3.1-8B-Instruct-4bit"
         print(f"Found local model at {model_path}")
         
     try:

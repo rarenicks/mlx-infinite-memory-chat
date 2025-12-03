@@ -4,12 +4,12 @@ A high-performance local chatbot for Apple Silicon. It uses a hybrid approach (R
 
 ## 🚀 Key Features
 
-*   **Local LLM**: Runs `Meta-Llama-3.1-70B-Instruct` locally using `mlx-lm` for high-performance inference on Apple Silicon.
+*   **Local LLM**: Runs `Meta-Llama-3.1-8B-Instruct` locally using `mlx-lm` for high-performance inference on Apple Silicon.
 *   **Hybrid Cognitive Architecture**:
     *   **Working Memory (Mental Model)**: Automatically reads and recursively summarizes uploaded documents (Map-Reduce) to build a global "Mental Model" injected into the system prompt.
     *   **Long-Term Memory (RAG)**: Uses `sentence-transformers` (MPS-accelerated) to index documents and retrieve specific details on demand.
 *   **Background Processing**: Summarization happens in a background thread, allowing you to chat immediately while the "Mental Model" is being built.
-*   **Memory-Aware**: Automatically checks available RAM (requires ~32GB min, 64GB recommended) to prevent system freezes.
+*   **Memory-Aware**: Automatically checks available RAM (requires ~8GB min, 16GB recommended) to prevent system freezes.
 *   **Sliding Window**: Manages conversation history to allow infinite chat sessions without hitting token limits.
 *   **Multi-Modal**: Supports PDF and Python file ingestion.
 
@@ -35,7 +35,7 @@ A high-performance local chatbot for Apple Silicon. It uses a hybrid approach (R
     ```
 
 3.  **Model Setup**:
-    *   Accept terms for `meta-llama/Meta-Llama-3.1-70B-Instruct` on Hugging Face.
+    *   Accept terms for `meta-llama/Meta-Llama-3.1-8B-Instruct` on Hugging Face.
     *   Login: `huggingface-cli login`
     *   Download:
         ```bash
