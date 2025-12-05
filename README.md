@@ -12,12 +12,18 @@ A high-performance local chatbot for Apple Silicon. It uses a hybrid approach (R
 *   **Memory-Aware**: Automatically checks available RAM (requires ~8GB min, 16GB recommended) to prevent system freezes.
 *   **Sliding Window**: Manages conversation history to allow infinite chat sessions without hitting token limits.
 *   **Multi-Modal**: Supports PDF and Python file ingestion.
+*   **"System 2" Reasoning Planner**: An agentic loop that "thinks" before it speaks, creating a plan to answer complex queries.
+*   **Local GraphRAG**: Extracts knowledge graphs from documents to find hidden relationships and connections.
+*   **UI Model Selection**: Switch between downloaded models (e.g., 8B vs 70B) directly from the settings menu.
+*   **MLX KV Context Caching**: Smart caching of the system prompt and mental model for instant prefill on subsequent turns.
+*   **Professional Logging**: Centralized, structured logging for easier debugging and monitoring.
 
 ## 🛠️ Tech Stack
 
 *   **Inference**: [MLX-LM](https://github.com/ml-explore/mlx-examples/tree/main/llms) (Apple Machine Learning framework)
 *   **UI**: [Chainlit](https://github.com/Chainlit/chainlit)
 *   **RAG**: `sentence-transformers`, `numpy`
+*   **GraphRAG**: `networkx` (Graph Construction), `pyvis` (Visualization)
 *   **PDF Processing**: `pypdf`
 
 ## 📦 Installation
@@ -63,6 +69,12 @@ This project uses a **Dual-Stream** approach:
 2.  **Stream B**: A vector store retrieves the top-5 most relevant chunks for every query.
 
 This allows the model to "know" the book (Summary) and "quote" the book (RAG).
+
+### "System 2" Reasoning
+Before answering, the model generates a "Reasoning Plan". This helps avoid hallucinations by breaking down the user's request into logical steps.
+
+### Local GraphRAG
+The system builds a Knowledge Graph from your documents. If you ask about relationships (e.g., "How is X related to Y?"), it queries this graph to find connections that standard vector search might miss.
 
 ## 📄 License
 MIT
