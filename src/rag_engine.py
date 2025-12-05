@@ -2,40 +2,43 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any
 import os
+from src.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 class RAGEngine:
     def __init__(self, model_name="all-MiniLM-L6-v2"):
-        print(f"INFO: Loading RAG embedding model: {model_name}...")
+        logger.info(f"Loading RAG embedding model: {model_name}...")
         # Check for MPS (Apple Silicon GPU) availability for PyTorch/SentenceTransformers
         device = "cpu"
         try:
             import torch
             if torch.backends.mps.is_available():
                 device = "mps"
-                print("INFO: RAG Engine using Apple Silicon GPU (MPS).")
+                logger.info("RAG Engine using Apple Silicon GPU (MPS).")
             else:
-                print("INFO: RAG Engine using CPU (MPS not available).")
+                logger.info("RAG Engine using CPU (MPS not available).")
         except ImportError:
-            print("INFO: RAG Engine using CPU (torch not found/checked).")
+            logger.info("RAG Engine using CPU (torch not found/checked).")
 
         self.model = SentenceTransformer(model_name, device=device)
         self.chunks: List[str] = []
         self.metadatas: List[Dict[str, Any]] = []
         self.embeddings: np.ndarray = None
-        print("INFO: RAG Engine initialized.")
+        logger.info("RAG Engine initialized.")
 
     def add_document(self, text: str, filename: str, chunk_size=500, overlap=50):
         """
         Chunks the document and adds it to the vector store.
         """
-        print(f"INFO: RAG - Adding document: {filename}")
+        logger.info(f"Adding document: {filename}")
         new_chunks = self._chunk_text(text, chunk_size, overlap)
         
         if not new_chunks:
             return
 
         # Embed new chunks
-        print(f"INFO: RAG - Embedding {len(new_chunks)} chunks...")
+        logger.info(f"Embedding {len(new_chunks)} chunks...")
         new_embeddings = self.model.encode(new_chunks)
         
         # Update storage
@@ -47,11 +50,12 @@ class RAGEngine:
         else:
             self.embeddings = np.vstack([self.embeddings, new_embeddings])
             
-        print(f"INFO: RAG - Total chunks in store: {len(self.chunks)}")
+        logger.info(f"Total chunks in store: {len(self.chunks)}")
 
-    def retrieve(self, query: str, k=5) -> List[str]:
+    def retrieve(self, query: str, k=5, threshold=0.3) -> List[str]:
         """
         Retrieves the top-k most relevant chunks for the query.
+        Filters out chunks with cosine similarity < threshold.
         """
         if self.embeddings is None or len(self.chunks) == 0:
             return []
@@ -73,7 +77,12 @@ class RAGEngine:
         
         results = []
         for idx in top_k_indices:
-            results.append(self.chunks[idx])
+            score = cosine_scores[idx]
+            if score >= threshold:
+                logger.debug(f"Chunk {idx} Score: {score:.4f} (Accepted)")
+                results.append(self.chunks[idx])
+            else:
+                logger.debug(f"Chunk {idx} Score: {score:.4f} (Rejected < {threshold})")
             
         return results
 

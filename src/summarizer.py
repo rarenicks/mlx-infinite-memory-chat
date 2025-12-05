@@ -4,6 +4,9 @@ from typing import List
 import time
 
 import threading
+from src.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 class RecursiveSummarizer:
     def __init__(self, model, tokenizer, model_lock: threading.Lock = None):
@@ -15,7 +18,7 @@ class RecursiveSummarizer:
         """
         Performs a Map-Reduce summarization of the document.
         """
-        print(f"INFO: Summarizer - Starting recursive summarization for {filename}...")
+        logger.info(f"Summarizer - Starting recursive summarization for {filename}...")
         start_time = time.time()
         
         # 1. Map Phase: Summarize chunks (or groups of chunks)
@@ -46,7 +49,7 @@ Summary:
                 summary = generate(self.model, self.tokenizer, prompt=prompt, max_tokens=200, verbose=False)
             
             intermediate_summaries.append(summary)
-            print(f"DEBUG: Summarized group {i//group_size + 1}/{(len(chunks)+group_size-1)//group_size}")
+            logger.debug(f"Summarized group {i//group_size + 1}/{(len(chunks)+group_size-1)//group_size}")
 
         # 2. Reduce Phase: Summarize the summaries
         if not intermediate_summaries:
@@ -68,11 +71,11 @@ Summaries:
 [/INST]
 Final Mental Model:
 """
-        print("INFO: Summarizer - Generating final Mental Model...")
+        logger.info("Summarizer - Generating final Mental Model...")
         with self.model_lock:
             final_summary = generate(self.model, self.tokenizer, prompt=final_prompt, max_tokens=1000, verbose=False)
         
         duration = time.time() - start_time
-        print(f"INFO: Summarizer - Completed in {duration:.2f}s")
+        logger.info(f"Summarizer - Completed in {duration:.2f}s")
         
         return final_summary

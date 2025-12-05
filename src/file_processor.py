@@ -1,5 +1,8 @@
 import os
 from pypdf import PdfReader
+from src.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 def process_file(file_path):
     """
@@ -9,6 +12,8 @@ def process_file(file_path):
     _, ext = os.path.splitext(file_path)
     ext = ext.lower()
     
+    logger.info(f"Processing file: {file_path}")
+    
     try:
         if ext == '.pdf':
             return _read_pdf(file_path)
@@ -17,6 +22,7 @@ def process_file(file_path):
         else:
             return f"Unsupported file type: {ext}"
     except Exception as e:
+        logger.error(f"Error processing file {file_path}: {str(e)}")
         return f"Error processing file {file_path}: {str(e)}"
 
 def _read_pdf(file_path):

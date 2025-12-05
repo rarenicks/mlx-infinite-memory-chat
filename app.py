@@ -2,7 +2,7 @@ import chainlit as cl
 from mlx_lm import generate, stream_generate
 import mlx.core as mx
 from mlx_lm.sample_utils import make_sampler
-from src.model_loader import load_model, check_memory
+from src.model_loader import load_model, check_memory, list_available_models
 from src.context_manager import ContextManager
 from src.file_processor import process_file
 from src.summarizer import RecursiveSummarizer
@@ -11,6 +11,9 @@ import threading
 import asyncio
 import time
 import gc
+from src.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 # Global state
 model = None
@@ -34,7 +37,9 @@ async def start():
         await msg.send()
         try:
             model, tokenizer = load_model()
-            context_manager = ContextManager(tokenizer)
+            # Initialize Context Manager
+            # Pass model for GraphRAG
+            context_manager = ContextManager(tokenizer, model=model, lock=model_lock)
             summarizer = RecursiveSummarizer(model, tokenizer, model_lock) # Pass lock
             msg.content = "✅ Model loaded successfully! You can now start chatting."
             await msg.update()
@@ -44,9 +49,19 @@ async def start():
             return
 
     # 3. Settings
+    available_models = list_available_models()
+    # Default to the first model or a specific one if available
+    initial_model = available_models[0] if available_models else "Llama-3.1-8B-Instruct-4bit"
+    
     settings = await cl.ChatSettings(
         [
-            cl.input_widget.TextInput(id="system_prompt", label="System Prompt", initial="You are a helpful AI assistant."),
+            cl.input_widget.Select(
+                id="model",
+                label="Model",
+                values=available_models,
+                initial_index=0 if available_models else 0
+            ),
+            cl.input_widget.TextInput(id="system_prompt", label="System Prompt", initial="You are a highly capable AI assistant running locally on Apple Silicon. You have access to a Knowledge Graph and RAG engine to answer questions based on uploaded documents. You can also plan complex tasks using a reasoning engine."),
             cl.input_widget.Slider(id="temperature", label="Temperature", initial=0.7, min=0.0, max=1.0, step=0.1),
             cl.input_widget.Slider(id="max_tokens", label="Max Response Tokens", initial=2048, min=128, max=8192, step=128),
         ]
@@ -60,6 +75,37 @@ async def start():
 
 @cl.on_settings_update
 async def setup_agent(settings):
+    global model, tokenizer, context_manager, summarizer, model_lock
+    
+    # Check if model changed
+    current_settings = cl.user_session.get("settings")
+    if current_settings and current_settings.get("model") != settings["model"]:
+        new_model_name = settings["model"]
+        await cl.Message(content=f"🔄 Switching model to **{new_model_name}**...").send()
+        
+        # Unload current model
+        with model_lock:
+            model = None
+            tokenizer = None
+            gc.collect()
+        
+        # Load new model
+        try:
+            model_path = os.path.join("models", new_model_name)
+            model, tokenizer = load_model(model_path)
+            
+            # Re-initialize components with new model
+            context_manager = ContextManager(tokenizer, model=model, lock=model_lock)
+            summarizer = RecursiveSummarizer(model, tokenizer, model_lock)
+            
+            # Restore system prompt
+            context_manager.set_system_prompt(settings["system_prompt"])
+            
+            await cl.Message(content=f"✅ Switched to **{new_model_name}** successfully!").send()
+        except Exception as e:
+            await cl.Message(content=f"❌ Error switching model: {e}").send()
+            return
+
     cl.user_session.set("settings", settings)
     if context_manager:
         context_manager.set_system_prompt(settings["system_prompt"])
@@ -78,17 +124,17 @@ async def main(message: cl.Message):
         await cl.Message(content="INFO: Processing uploaded files...").send()
         for element in message.elements:
             if element.path:
-                print(f"INFO: Processing {element.name}...")
+                logger.info(f"Processing {element.name}...")
                 content = process_file(element.path)
                 
                 # A. Immediate RAG Indexing
                 context_manager.add_file_context(content, filename=element.name)
-                print(f"INFO: Added {element.name} to RAG context.")
+                logger.info(f"Added {element.name} to RAG context.")
                 await cl.Message(content=f"📄 Indexed {element.name} for RAG retrieval.").send()
                 
                 # B. Background Summarization (The "Novel" Part)
                 def run_summarization(text, fname):
-                    print(f"INFO: Starting background summarization for {fname}...")
+                    logger.info(f"Starting background summarization for {fname}...")
                     # Get chunks from RAG engine (it already chunked them)
                     # For simplicity, we'll just re-chunk or access rag.chunks if we exposed them.
                     # Let's just use the raw text and let summarizer handle it (or use rag chunks if accessible).
@@ -98,7 +144,7 @@ async def main(message: cl.Message):
                     # Let's pass the text and let summarizer chunk it for summarization (maybe different size).
                     summary = summarizer.summarize(context_manager.rag._chunk_text(text, 1000, 100), fname)
                     context_manager.set_document_summary(summary)
-                    print(f"INFO: Mental Model updated for {fname}.")
+                    logger.info(f"Mental Model updated for {fname}.")
                     
                 # Start thread
                 threading.Thread(target=run_summarization, args=(content, element.name), daemon=True).start()
@@ -133,7 +179,7 @@ async def main(message: cl.Message):
     # We use a separate lock acquisition here if needed, but since it's sequential in this async function, 
     # we just need to make sure we don't conflict with background summarizer.
     
-    print("INFO: Starting Reasoning Step...")
+    logger.info("Starting Reasoning Step...")
     
     # We'll use a simple generate call for reasoning (no streaming needed for the step content necessarily, but looks cool)
     # Let's stream it to the step.
@@ -150,8 +196,22 @@ async def main(message: cl.Message):
                 
         await reasoning_step.update()
         
+        # --- GRAPH VISUALIZATION ---
+        # If the plan mentions "relationships" or "connections", show the graph
+        if context_manager.graph_rag and ("relation" in reasoning_plan.lower() or "connect" in reasoning_plan.lower()):
+            html_path = "graph.html"
+            context_manager.graph_rag.visualize(html_path)
+            if os.path.exists(html_path):
+                # Read HTML content
+                with open(html_path, "r") as f:
+                    html_content = f.read()
+                # Display as Chainlit Element
+                await cl.Message(content="🕸️ **Knowledge Graph Visualization**", elements=[
+                    cl.Html(content=html_content, name="knowledge_graph", display="inline")
+                ]).send()
+        
     except Exception as e:
-        print(f"ERROR in Reasoning: {e}")
+        logger.error(f"ERROR in Reasoning: {e}")
         reasoning_plan = "Error generating plan. Proceeding with direct answer."
         await reasoning_step.stream_token(f"\nError: {e}")
         await reasoning_step.update()
@@ -209,7 +269,7 @@ async def main(message: cl.Message):
     
     # If cache is missing or text changed, rebuild it.
     if kv_cache is None or cached_text != static_text:
-        print("INFO: KV Cache Miss. Rebuilding static cache...")
+        logger.info("KV Cache Miss. Rebuilding static cache...")
         # Tokenize just the system message part
         # We need to manually format it as a system message for Llama 3
         static_tokens = tokenizer.encode(f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{static_text}<|eot_id|>")
@@ -229,9 +289,9 @@ async def main(message: cl.Message):
         # Store in session
         cl.user_session.set("kv_cache", kv_cache)
         cl.user_session.set("cached_text", static_text)
-        print(f"INFO: KV Cache Rebuilt. ({len(static_tokens)} tokens)")
+        logger.info(f"KV Cache Rebuilt. ({len(static_tokens)} tokens)")
     else:
-        print("INFO: KV Cache Hit! Reusing static context.")
+        logger.info("KV Cache Hit! Reusing static context.")
 
     # 2. Generate Final Response using Cache
     # Now we need to generate the REST of the prompt (History + User Message + Plan)
@@ -297,7 +357,7 @@ async def main(message: cl.Message):
     response_content = ""
     
     # Verify device
-    print(f"INFO: MLX Device: {mx.default_device()}")
+    logger.info(f"MLX Device: {mx.default_device()}")
     
     start_time = time.time()
     
@@ -307,7 +367,7 @@ async def main(message: cl.Message):
     
     def generate_worker():
         """Runs the blocking generation in a separate thread."""
-        print("DEBUG: Generation worker thread started.")
+        logger.debug("Generation worker thread started.")
         
         token_count = 0
         first_token_time = 0
@@ -336,7 +396,7 @@ async def main(message: cl.Message):
                         first_token_time = current_time
                         decode_start = current_time
                         prefill_duration = first_token_time - start_gen
-                        print(f"INFO: Prefill complete in {prefill_duration:.2f}s")
+                        logger.info(f"Prefill complete in {prefill_duration:.2f}s")
                     
                     # Put token in queue in a thread-safe way
                     loop.call_soon_threadsafe(token_queue.put_nowait, response.text)
@@ -346,24 +406,24 @@ async def main(message: cl.Message):
             
             if token_count > 1 and decode_duration > 0:
                 tps = (token_count - 1) / decode_duration
-                print(f"INFO: Generation complete. Decode Speed: {tps:.2f} tokens/sec (excluding prefill).")
+                logger.info(f"Generation complete. Decode Speed: {tps:.2f} tokens/sec (excluding prefill).")
             else:
-                print(f"INFO: Generation complete. Total tokens: {token_count}")
+                logger.info(f"Generation complete. Total tokens: {token_count}")
             
             # Signal completion
             loop.call_soon_threadsafe(token_queue.put_nowait, None)
             
         except Exception as e:
             # Signal error
-            print(f"ERROR in generation worker: {e}")
+            logger.error(f"ERROR in generation worker: {e}")
             loop.call_soon_threadsafe(token_queue.put_nowait, e)
         finally:
             # Force cleanup in the thread
             gc.collect()
-            print("DEBUG: Generation worker cleanup done.")
+            logger.debug("Generation worker cleanup done.")
 
     # Start generation in a background thread
-    print("DEBUG: Starting generation thread...")
+    logger.debug("Starting generation thread...")
     threading.Thread(target=generate_worker, daemon=True).start()
 
     # Consume tokens from the queue asynchronously
@@ -375,7 +435,7 @@ async def main(message: cl.Message):
             
             if not first_token_received and token is not None:
                 first_token_time = time.time() - start_time
-                print(f"INFO: First token received after {first_token_time:.2f}s")
+                logger.info(f"First token received after {first_token_time:.2f}s")
                 first_token_received = True
             
             # Check for completion sentinel
@@ -405,4 +465,4 @@ async def main(message: cl.Message):
     if stats['percent'] > 80:
         await cl.Message(content=f"⚠️ **Warning**: Context usage at {stats['percent']:.1f}% ({stats['total']}/{stats['limit']})").send()
     else:
-        print(f"Token Usage: {stats['total']}/{stats['limit']} ({stats['percent']:.1f}%)")
+        logger.info(f"Token Usage: {stats['total']}/{stats['limit']} ({stats['percent']:.1f}%)")

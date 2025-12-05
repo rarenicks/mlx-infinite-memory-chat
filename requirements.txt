@@ -4,4 +4,6 @@ pypdf>=3.17.0
 psutil>=5.9.0
 transformers>=4.40.0
 sentence-transformers
+networkx
+pyvis
 numpy
